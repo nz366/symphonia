@@ -1,5 +1,5 @@
 // Symphonia
-// Copyright (c) 2019-2022 The Project Symphonia Developers.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -136,7 +136,7 @@ impl<R: io::Read> io::Read for ReadOnlySource<R> {
 
 impl<R: io::Read> io::Seek for ReadOnlySource<R> {
     fn seek(&mut self, _: io::SeekFrom) -> io::Result<u64> {
-        Err(io::Error::new(io::ErrorKind::Other, "source does not support seeking"))
+        Err(io::Error::other("source does not support seeking"))
     }
 }
 
@@ -369,7 +369,7 @@ pub trait ReadBytes {
     fn pos(&self) -> u64;
 }
 
-impl<'b, R: ReadBytes> ReadBytes for &'b mut R {
+impl<R: ReadBytes> ReadBytes for &mut R {
     #[inline(always)]
     fn read_byte(&mut self) -> io::Result<u8> {
         (*self).read_byte()
@@ -421,7 +421,7 @@ impl<'b, R: ReadBytes> ReadBytes for &'b mut R {
     }
 }
 
-impl<'b, S: SeekBuffered> SeekBuffered for &'b mut S {
+impl<S: SeekBuffered> SeekBuffered for &mut S {
     fn ensure_seekback_buffer(&mut self, len: usize) {
         (*self).ensure_seekback_buffer(len)
     }
@@ -475,12 +475,12 @@ pub trait SeekBuffered {
     /// This function is identical to [`SeekBuffered::seek_buffered_rel`] when a negative delta is
     /// provided.
     fn seek_buffered_rev(&mut self, delta: usize) {
-        assert!(delta < std::isize::MAX as usize);
+        assert!(delta < isize::MAX as usize);
         self.seek_buffered_rel(-(delta as isize));
     }
 }
 
-impl<'b, F: FiniteStream> FiniteStream for &'b mut F {
+impl<F: FiniteStream> FiniteStream for &mut F {
     fn byte_len(&self) -> u64 {
         (**self).byte_len()
     }

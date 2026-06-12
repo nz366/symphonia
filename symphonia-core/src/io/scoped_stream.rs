@@ -1,5 +1,5 @@
 // Symphonia
-// Copyright (c) 2019-2022 The Project Symphonia Developers.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -184,8 +184,8 @@ impl<B: ReadBytes + SeekBuffered> SeekBuffered for ScopedStream<B> {
     fn seek_buffered_rel(&mut self, delta: isize) -> u64 {
         // Clamp the delta value such that the absolute position after the buffered seek will be
         // within the bounds of the ScopedStream.
-        let max_back = self.read.min(std::isize::MAX as u64) as isize;
-        let max_forward = (self.len - self.read).min(std::isize::MAX as u64) as isize;
+        let max_back = self.read.min(isize::MAX as u64) as isize;
+        let max_forward = (self.len - self.read).min(isize::MAX as u64) as isize;
         self.inner.seek_buffered_rel(delta.clamp(-max_back, max_forward))
     }
 }

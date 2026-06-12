@@ -1,5 +1,5 @@
 // Symphonia
-// Copyright (c) 2019-2022 The Project Symphonia Developers.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -20,7 +20,7 @@ pub struct BitSetIterator<'a> {
     count: usize,
 }
 
-impl<'a> Iterator for BitSetIterator<'a> {
+impl Iterator for BitSetIterator<'_> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -123,7 +123,7 @@ mod tests {
 
         assert_eq!(bitset.count(), 0);
 
-        for _ in bitset.iter() {
+        if let Some(_) = bitset.iter().next() {
             panic!("Should be empty!");
         }
 

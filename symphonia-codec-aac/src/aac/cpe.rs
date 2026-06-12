@@ -1,5 +1,5 @@
 // Symphonia
-// Copyright (c) 2019-2022 The Project Symphonia Developers.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
 // Previous Author: Kostya Shishkov <kostya.shiskov@gmail.com>
 //
@@ -11,14 +11,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use symphonia_core::audio::{AudioBuffer, Signal};
-use symphonia_core::errors::{decode_error, Result};
+use symphonia_core::audio::{AudioBuffer, AudioMut};
+use symphonia_core::errors::{Result, decode_error};
 use symphonia_core::io::ReadBitsLtr;
+
+use symphonia_common::mpeg::audio::AudioObjectType;
 
 use crate::aac::common::*;
 use crate::aac::dsp;
 use crate::aac::ics;
-use crate::common::M4AType;
 
 #[derive(Clone)]
 pub struct ChannelPair {
@@ -49,17 +50,26 @@ impl ChannelPair {
         self.ics1.reset();
     }
 
-    pub fn decode_ga_sce<B: ReadBitsLtr>(&mut self, bs: &mut B, m4atype: M4AType) -> Result<()> {
-        self.ics0.decode(bs, &mut self.lcg, m4atype, false)?;
+    pub fn decode_ga_sce<B: ReadBitsLtr>(
+        &mut self,
+        bs: &mut B,
+        aot: AudioObjectType,
+    ) -> Result<()> {
+        self.ics0.decode(bs, &mut self.lcg, aot, false)?;
         Ok(())
     }
 
-    pub fn decode_ga_cpe<B: ReadBitsLtr>(&mut self, bs: &mut B, m4atype: M4AType) -> Result<()> {
+    pub fn decode_ga_cpe<B: ReadBitsLtr>(
+        &mut self,
+        bs: &mut B,
+        aot: AudioObjectType,
+    ) -> Result<()> {
         let common_window = bs.read_bool()?;
 
         if common_window {
             // Decode the common ICS info block into the first channel.
-            self.ics0.info.decode(bs)?;
+            // do not call self.ics0.info.decode() as it will skip required validations present in self.ics0.decode_info()
+            self.ics0.decode_info(bs)?;
 
             // Mid-side stereo mask decoding.
             self.ms_mask_present = bs.read_bits_leq32(2)? as u8;
@@ -93,8 +103,8 @@ impl ChannelPair {
             self.ics1.info.copy_from_common(&self.ics0.info);
         }
 
-        self.ics0.decode(bs, &mut self.lcg, m4atype, common_window)?;
-        self.ics1.decode(bs, &mut self.lcg, m4atype, common_window)?;
+        self.ics0.decode(bs, &mut self.lcg, aot, common_window)?;
+        self.ics1.decode(bs, &mut self.lcg, aot, common_window)?;
 
         // Joint-stereo decoding
         if common_window {
@@ -155,10 +165,18 @@ impl ChannelPair {
         abuf: &mut AudioBuffer<f32>,
         rate_idx: usize,
     ) {
-        self.ics0.synth_channel(dsp, rate_idx, abuf.chan_mut(self.channel));
+        self.ics0.synth_channel(
+            dsp,
+            rate_idx,
+            abuf.plane_mut(self.channel).expect("channel index is valid"),
+        );
 
         if self.is_pair {
-            self.ics1.synth_channel(dsp, rate_idx, abuf.chan_mut(self.channel + 1));
+            self.ics1.synth_channel(
+                dsp,
+                rate_idx,
+                abuf.plane_mut(self.channel + 1).expect("channel+1 index is valid"),
+            );
         }
     }
 }

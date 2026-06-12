@@ -1,5 +1,5 @@
 // Symphonia
-// Copyright (c) 2019-2022 The Project Symphonia Developers.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -16,17 +16,21 @@
 // Disable to better express the specification.
 #![allow(clippy::collapsible_else_if)]
 
-use symphonia_core::audio::{AsAudioBufferRef, AudioBuffer, AudioBufferRef};
-use symphonia_core::audio::{Signal, SignalSpec};
-use symphonia_core::codecs::{CodecDescriptor, CodecParameters, CODEC_TYPE_VORBIS};
-use symphonia_core::codecs::{Decoder, DecoderOptions, FinalizeResult};
+use symphonia_core::audio::{
+    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
+};
+use symphonia_core::codecs::CodecInfo;
+use symphonia_core::codecs::audio::well_known::CODEC_ID_VORBIS;
+use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
+use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult};
+use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::dsp::mdct::Imdct;
-use symphonia_core::errors::{decode_error, unsupported_error, Result};
-use symphonia_core::formats::Packet;
+use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::{BitReaderRtl, BufReader, FiniteBitStream, ReadBitsRtl, ReadBytes};
-use symphonia_core::support_codec;
+use symphonia_core::packet::PacketRef;
+use symphonia_core::support_audio_codec;
 
-use symphonia_utils_xiph::vorbis::*;
+use symphonia_common::xiph::audio::vorbis::*;
 
 use log::{debug, warn};
 
@@ -46,8 +50,10 @@ use window::Windows;
 
 /// Vorbis decoder.
 pub struct VorbisDecoder {
+    /// Decoder options.
+    opts: AudioDecoderOptions,
     /// Codec paramters.
-    params: CodecParameters,
+    params: AudioCodecParameters,
     /// Identity header.
     ident: IdentHeader,
     /// Codebooks (max. 256).
@@ -66,9 +72,79 @@ pub struct VorbisDecoder {
     buf: AudioBuffer<f32>,
 }
 
+fn read_extradata(buf: &[u8]) -> Result<(IdentHeader, Setup)> {
+    let is_xiph_laced = !buf.is_empty() && buf[0] == XIPH_LACED_LEADING_HEADER;
+    if is_xiph_laced {
+        let (pkt_ident, pkt_setup) = unpack_xiph_laced_extradata(buf)?;
+        let ident = read_ident_header(&mut BufReader::new(pkt_ident))?;
+        let setup = read_setup(&mut BufReader::new(pkt_setup), &ident)?;
+        Ok((ident, setup))
+    }
+    else {
+        let mut reader = BufReader::new(buf);
+        let ident = read_ident_header(&mut reader)?;
+        let setup = read_setup(&mut reader, &ident)?;
+        Ok((ident, setup))
+    }
+}
+
 impl VorbisDecoder {
-    fn decode_inner(&mut self, packet: &Packet) -> Result<()> {
-        let mut bs = BitReaderRtl::new(packet.buf());
+    pub fn try_new(params: &AudioCodecParameters, opts: &AudioDecoderOptions) -> Result<Self> {
+        // This decoder only supports Vorbis.
+        if params.codec != CODEC_ID_VORBIS {
+            return unsupported_error("vorbis: invalid codec");
+        }
+
+        // Get the extra data (mandatory).
+        let extra_data = match params.extra_data.as_ref() {
+            Some(buf) => buf,
+            _ => return unsupported_error("vorbis: missing extra data"),
+        };
+
+        // The extra data contains the identification and setup headers.
+        let (ident, setup) = read_extradata(extra_data)?;
+
+        // Initialize static DSP data.
+        let windows = Windows::new(1 << ident.bs0_exp, 1 << ident.bs1_exp);
+
+        // Initialize dynamic DSP for each channel.
+        let dsp_channels =
+            (0..ident.n_channels).map(|_| DspChannel::new(ident.bs0_exp, ident.bs1_exp)).collect();
+
+        // Map the channels
+        let channels = match vorbis_channels_to_channels(ident.n_channels) {
+            Some(channels) => channels,
+            _ => return unsupported_error("vorbis: unknown channel map (fix me)"),
+        };
+
+        // Initialize the output buffer.
+        let spec = AudioSpec::new(ident.sample_rate, channels);
+
+        let imdct_short = Imdct::new((1 << ident.bs0_exp) >> 1);
+        let imdct_long = Imdct::new((1 << ident.bs1_exp) >> 1);
+
+        // TODO: Should this be half the block size?
+        let duration = 1 << ident.bs1_exp;
+
+        let dsp =
+            Dsp { windows, channels: dsp_channels, imdct_short, imdct_long, prev_block_flag: None };
+
+        Ok(VorbisDecoder {
+            opts: *opts,
+            params: params.clone(),
+            ident,
+            codebooks: setup.codebooks,
+            floors: setup.floors,
+            residues: setup.residues,
+            modes: setup.modes,
+            mappings: setup.mappings,
+            dsp,
+            buf: AudioBuffer::new(spec, duration),
+        })
+    }
+
+    fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
+        let mut bs = BitReaderRtl::new(packet.data);
 
         // Section 4.3.1 - Packet Type, Mode, and Window Decode
 
@@ -190,20 +266,10 @@ impl VorbisDecoder {
 
             for (m, a) in magnitude_ch.residue[..n2].iter_mut().zip(&mut angle_ch.residue[..n2]) {
                 let (new_m, new_a) = if *m > 0.0 {
-                    if *a > 0.0 {
-                        (*m, *m - *a)
-                    }
-                    else {
-                        (*m + *a, *m)
-                    }
+                    if *a > 0.0 { (*m, *m - *a) } else { (*m + *a, *m) }
                 }
                 else {
-                    if *a > 0.0 {
-                        (*m, *m + *a)
-                    }
-                    else {
-                        (*m - *a, *m)
-                    }
+                    if *a > 0.0 { (*m, *m + *a) } else { (*m - *a, *m) }
                 };
 
                 *m = new_m;
@@ -229,121 +295,64 @@ impl VorbisDecoder {
         self.buf.clear();
 
         // Calculate the output length and reserve space in the output buffer. If there was no
-        // previous packet, then return an empty audio buffer since the decoder will need another
-        // packet before being able to produce audio.
-        if let Some(lap_state) = &self.dsp.lapping_state {
-            // The previous block size.
-            let prev_block_n = if lap_state.prev_block_flag {
-                1 << self.ident.bs1_exp
-            }
-            else {
-                1 << self.ident.bs0_exp
-            };
+        // previous packet, then use the current block size so the rendered length is half the
+        // current block size.
+        let prev_block_flag = self.dsp.prev_block_flag.unwrap_or(mode.block_flag);
 
-            let render_len = (prev_block_n + n) / 4;
-            self.buf.render_reserved(Some(render_len));
-        }
+        let prev_block_n =
+            1 << if prev_block_flag { self.ident.bs1_exp } else { self.ident.bs0_exp };
+
+        self.buf.render_uninit(Some((prev_block_n + n) / 4));
 
         // Render all the audio channels.
         for (i, channel) in self.dsp.channels.iter_mut().enumerate() {
-            channel.synth(
-                mode.block_flag,
-                &self.dsp.lapping_state,
-                &self.dsp.windows,
-                imdct,
-                self.buf.chan_mut(map_vorbis_channel(self.ident.n_channels, i)),
-            );
+            let ch_idx = map_vorbis_channel(self.ident.n_channels, i);
+            let plane = match self.buf.plane_mut(ch_idx) {
+                Some(p) => p,
+                None => return decode_error("vorbis: missing audio plane"),
+            };
+            channel.synth(mode.block_flag, prev_block_flag, &self.dsp.windows, imdct, plane);
         }
 
-        // Trim
-        self.buf.trim(packet.trim_start() as usize, packet.trim_end() as usize);
+        // Trim gaps.
+        if self.opts.gapless {
+            if self.dsp.prev_block_flag.is_none() {
+                // The first packet after a decoder reset is silenced when trimming gaps.
+                self.buf.clear();
+            }
+            else {
+                self.buf.trim(packet.trim_start.get() as usize, packet.trim_end.get() as usize);
+            }
+        }
 
-        // Save the new lapping state.
-        self.dsp.lapping_state = Some(LappingState { prev_block_flag: mode.block_flag });
+        // Update the previous block flag.
+        self.dsp.prev_block_flag = Some(mode.block_flag);
 
         Ok(())
     }
 }
 
-impl Decoder for VorbisDecoder {
-    fn try_new(params: &CodecParameters, _: &DecoderOptions) -> Result<Self> {
-        // This decoder only supports Vorbis.
-        if params.codec != CODEC_TYPE_VORBIS {
-            return unsupported_error("vorbis: invalid codec type");
-        }
-
-        // Get the extra data (mandatory).
-        let extra_data = match params.extra_data.as_ref() {
-            Some(buf) => buf,
-            _ => return unsupported_error("vorbis: missing extra data"),
-        };
-
-        // The extra data contains the identification and setup headers.
-        let mut reader = BufReader::new(extra_data);
-
-        // Read ident header.
-        let ident = read_ident_header(&mut reader)?;
-
-        // Read setup data.
-        let setup = read_setup(&mut reader, &ident)?;
-
-        // Initialize static DSP data.
-        let windows = Windows::new(1 << ident.bs0_exp, 1 << ident.bs1_exp);
-
-        // Initialize dynamic DSP for each channel.
-        let dsp_channels =
-            (0..ident.n_channels).map(|_| DspChannel::new(ident.bs0_exp, ident.bs1_exp)).collect();
-
-        // Map the channels
-        let channels = match vorbis_channels_to_channels(ident.n_channels) {
-            Some(channels) => channels,
-            _ => return unsupported_error("vorbis: unknown channel map (fix me)"),
-        };
-
-        // Initialize the output buffer.
-        let spec = SignalSpec::new(ident.sample_rate, channels);
-
-        let imdct_short = Imdct::new((1 << ident.bs0_exp) >> 1);
-        let imdct_long = Imdct::new((1 << ident.bs1_exp) >> 1);
-
-        // TODO: Should this be half the block size?
-        let duration = 1u64 << ident.bs1_exp;
-
-        let dsp =
-            Dsp { windows, channels: dsp_channels, imdct_short, imdct_long, lapping_state: None };
-
-        Ok(VorbisDecoder {
-            params: params.clone(),
-            ident,
-            codebooks: setup.codebooks,
-            floors: setup.floors,
-            residues: setup.residues,
-            modes: setup.modes,
-            mappings: setup.mappings,
-            dsp,
-            buf: AudioBuffer::new(duration, spec),
-        })
-    }
-
+impl AudioDecoder for VorbisDecoder {
     fn reset(&mut self) {
         self.dsp.reset();
     }
 
-    fn supported_codecs() -> &'static [CodecDescriptor] {
-        &[support_codec!(CODEC_TYPE_VORBIS, "vorbis", "Vorbis")]
+    fn codec_info(&self) -> &CodecInfo {
+        // Only one codec is supported.
+        &Self::supported_codecs().first().expect("at least one codec registered").info
     }
 
-    fn codec_params(&self) -> &CodecParameters {
+    fn codec_params(&self) -> &AudioCodecParameters {
         &self.params
     }
 
-    fn decode(&mut self, packet: &Packet) -> Result<AudioBufferRef<'_>> {
+    fn decode_ref(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
         if let Err(e) = self.decode_inner(packet) {
             self.buf.clear();
             Err(e)
         }
         else {
-            Ok(self.buf.as_audio_buffer_ref())
+            Ok(self.buf.as_generic_audio_buffer_ref())
         }
     }
 
@@ -351,8 +360,24 @@ impl Decoder for VorbisDecoder {
         Default::default()
     }
 
-    fn last_decoded(&self) -> AudioBufferRef<'_> {
-        self.buf.as_audio_buffer_ref()
+    fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
+        self.buf.as_generic_audio_buffer_ref()
+    }
+}
+
+impl RegisterableAudioDecoder for VorbisDecoder {
+    fn try_registry_new(
+        params: &AudioCodecParameters,
+        opts: &AudioDecoderOptions,
+    ) -> Result<Box<dyn AudioDecoder>>
+    where
+        Self: Sized,
+    {
+        Ok(Box::new(VorbisDecoder::try_new(params, opts)?))
+    }
+
+    fn supported_codecs() -> &'static [SupportedAudioCodec] {
+        &[support_audio_codec!(CODEC_ID_VORBIS, "vorbis", "Vorbis")]
     }
 }
 
@@ -743,7 +768,7 @@ fn read_mode(bs: &mut BitReaderRtl<'_>, max_mapping: u8) -> Result<Mode> {
 /// total number of channels.
 ///
 /// See channel map as defined in section 4.3.9 of the Vorbis I specification.
-pub fn map_vorbis_channel(num_channels: u8, ch: usize) -> usize {
+fn map_vorbis_channel(num_channels: u8, ch: usize) -> usize {
     // This pre-condition should always be true.
     assert!(ch < usize::from(num_channels));
 

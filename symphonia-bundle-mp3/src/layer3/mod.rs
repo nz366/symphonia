@@ -1,5 +1,5 @@
 // Symphonia
-// Copyright (c) 2019-2022 The Project Symphonia Developers.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -7,8 +7,8 @@
 
 use std::fmt;
 
-use symphonia_core::audio::{AudioBuffer, Signal};
-use symphonia_core::errors::{decode_error, Error, Result};
+use symphonia_core::audio::{AudioBuffer, AudioMut};
+use symphonia_core::errors::{Error, Result, decode_error};
 use symphonia_core::io::{BitReaderLtr, BufReader, ReadBitsLtr, ReadBytes};
 
 mod bitstream;
@@ -83,7 +83,7 @@ impl BitResevoir {
             // The number of bytes that will be missing.
             let underflow = (main_data_begin - unread) as u32;
 
-            warn!("mpa: invalid main_data_begin, underflow by {} bytes", underflow);
+            warn!("mpa: invalid main_data_begin, underflow by {underflow} bytes");
 
             underflow
         };
@@ -154,11 +154,11 @@ struct GranuleChannel {
     /// per scale factor.
     ///
     /// - For MPEG1 bitstreams, `scalefac_compress` is a 4-bit index into
-    ///  `SCALE_FACTOR_SLEN[0..16]` to obtain a number of bits per scale factor pair.
+    ///   `SCALE_FACTOR_SLEN[0..16]` to obtain a number of bits per scale factor pair.
     ///
     /// - For MPEG2/2.5 bitstreams, `scalefac_compress` is a 9-bit value that decodes into
-    /// `slen[0..3]` (referred to as slen1-4 in the standard) for the number of bits per scale
-    /// factor, and depending on which range the value falls into, for which bands.
+    ///   `slen[0..3]` (referred to as slen1-4 in the standard) for the number of bits per scale
+    ///   factor, and depending on which range the value falls into, for which bands.
     scalefac_compress: u16,
     /// Indicates the block type (type of window) for the channel in the granule.
     block_type: BlockType,
@@ -243,7 +243,7 @@ impl fmt::Debug for GranuleChannel {
 
         write!(f, "\tscalefacs=[ ")?;
         for sf in &self.scalefacs[..] {
-            write!(f, "{}, ", sf)?;
+            write!(f, "{sf}, ")?;
         }
         writeln!(f, "]")?;
         writeln!(f, "\trzero={}", self.rzero)?;
@@ -435,7 +435,7 @@ impl Layer for Layer3 {
 
             // Each granule will yield 576 samples. After reserving frames, all steps must be
             // infalliable.
-            out.render_reserved(Some(576));
+            out.render_uninit(Some(576));
 
             // The next steps are independant of channel count.
             for ch in 0..header.n_channels() {
@@ -462,7 +462,10 @@ impl Layer for Layer3 {
                 hybrid_synthesis::frequency_inversion(&mut self.samples[gr][ch]);
 
                 // Perform polyphase synthesis and generate PCM samples.
-                let out_ch_samples = out.chan_mut(ch);
+                let out_ch_samples = match out.plane_mut(ch) {
+                    Some(p) => p,
+                    None => return decode_error("mp3: missing audio plane"),
+                };
 
                 synthesis::synthesis(
                     &mut self.synthesis[ch],

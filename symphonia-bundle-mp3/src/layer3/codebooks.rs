@@ -1,5 +1,5 @@
 // Symphonia
-// Copyright (c) 2019-2022 The Project Symphonia Developers.
+// Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -578,7 +578,7 @@ lazy_static! {
             // Decode a maximum of 8 bits per read.
             builder.bits_per_read(8);
 
-            *codebook = builder.make(table.codes, table.lens, &values).unwrap();
+            *codebook = builder.make(table.codes, table.lens, &values).expect("valid static codebook data");
         }
 
         codebooks
@@ -604,7 +604,7 @@ lazy_static! {
             // Decode a maximum of 8 bits per read.
             builder.bits_per_read(8);
 
-            *codebook = builder.make(table.codes, table.lens, &values).unwrap();
+            *codebook = builder.make(table.codes, table.lens, &values).expect("valid static codebook data");
         }
 
         codebooks

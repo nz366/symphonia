@@ -13,6 +13,9 @@ Cargo.lock
 *.code-workspace
 .vscode
 
+# Intelij Idea
+.idea
+
 # Profiling data
 perf.data
 perf.data.old

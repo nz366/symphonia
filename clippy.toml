@@ -39,4 +39,6 @@
 #   they're instructive to the reader and improve the code aesthetics.
 #
 # --------------------------------------------------------------------------------------------------
-msrv = "1.53"
+msrv = "1.85"
+
+allow-unwrap-in-tests = true
